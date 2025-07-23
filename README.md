@@ -14,3 +14,7 @@ Génération du keystream pour frame: tn=1, hn=110, mn=30, fn=6, sn=1, dir=0, ks
 Potential Key found: 11111111 !
 ^CInterruption par l'utilisateur, fermeture du pool.
 ```
+
+Video :  
+
+https://www.youtube.com/watch?v=aam0SwD2Vt0
