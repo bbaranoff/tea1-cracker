@@ -3,7 +3,7 @@ import pyopencl as cl
 import numpy as np
 import multiprocessing
 from multiprocessing import Manager
-
+import sys
 # Charger et compiler le code OpenCL
 KERNEL_CODE = """
 __constant ushort g_awTea1LutA[8] = { 0xDA86, 0x85E9, 0x29B5, 0x2BC6, 0x8C6B, 0x974C, 0xC671, 0x93E2 };
@@ -99,12 +99,12 @@ __kernel void gen_ks(__global uchar* output,
             return;
         }
 
-        uint eck[4];
-        eck[0] = (uchar)(counter >> 24);
-        eck[1] = (uchar)(counter >> 16);
-        eck[2] = (uchar)(counter >> 8);
-        eck[3] = (uchar)counter;
-        uint dwKeyReg = ((uint)eck[0] << 24) | ((uint)eck[1] << 16) | ((uint)eck[2] << 8) | (uint)eck[3];
+        uint ks[4];
+        ks[0] = (uchar)(counter >> 24);
+        ks[1] = (uchar)(counter >> 16);
+        ks[2] = (uchar)(counter >> 8);
+        ks[3] = (uchar)counter;
+        uint dwKeyReg = ((uint)ks[0] << 24) | ((uint)ks[1] << 16) | ((uint)ks[2] << 8) | (uint)ks[3];
 
         tea1_inner(qwIv, dwKeyReg, ks_len, ks_out);
 
@@ -162,53 +162,121 @@ def build_iv(frame):
             ((frame['hn'] & 0x7FFF) << 13) |
             (frame['dir'] << 28))
 
-def prepare_key_stream_worker(start, end, tn, hn, mn, fn, sn, direction, eck, key_length, match_counter):
-    #print(f"Thread {multiprocessing.current_process().name} processing range: {start} - {end}")
 
+
+
+
+
+import time
+import sys
+import multiprocessing
+from multiprocessing import Manager
+
+def prepare_key_stream(tn, hn, mn, fn, sn, direction, ks, key_length):
+    total_range = 0xFFFFFFFF
+    num_threads = 32
+    chunk_size = total_range // num_threads
+
+    ranges = [(i * chunk_size, (i + 1) * chunk_size - 1) for i in range(num_threads)]
+
+    start_time = time.time()
+
+    with Manager() as manager:
+        match_counter = manager.dict({'value': 0})
+        pool = multiprocessing.Pool(processes=num_threads)
+        try:
+            results = pool.starmap(
+                prepare_key_stream_worker,
+                [(start, end, tn, hn, mn, fn, sn, direction, ks, key_length, match_counter) for start, end in ranges]
+            )
+        except KeyboardInterrupt:
+            pool.terminate()
+            pool.join()
+            print("Interruption par l'utilisateur, fermeture du pool.")
+            sys.exit(1)
+        else:
+            pool.close()
+            pool.join()
+
+    elapsed = time.time() - start_time
+
+    for result in results:
+        if result is not None:
+            print(f"[+] Clé trouvée ! Temps écoulé : {elapsed:.2f} secondes")
+            return result
+
+    if match_counter['value'] != 0:
+        print(f"[+] Clé trouvée (via match_counter) ! Temps écoulé : {elapsed:.2f} secondes")
+    else:
+        print(f"[-] Aucune clé trouvée après test complet. Temps total écoulé : {elapsed:.2f} secondes")
+
+    return None
+
+def prepare_key_stream_worker(start, end, tn, hn, mn, fn, sn, direction, ks, key_length, match_counter):
+    # ... initialisation OpenCL etc ...
+
+    import time
+
+    # Initialiser le GPU
     platforms = cl.get_platforms()
     gpu_devices = [device for platform in platforms for device in platform.get_devices(device_type=cl.device_type.GPU)]
     if not gpu_devices:
-        raise RuntimeError("No GPU devices found.")
+        raise RuntimeError("Aucun périphérique GPU trouvé.")
 
     context = cl.Context(devices=gpu_devices)
     queue = cl.CommandQueue(context, properties=cl.command_queue_properties.PROFILING_ENABLE)
 
+    # Compiler le noyau OpenCL
     try:
         program = cl.Program(context, KERNEL_CODE).build()
     except cl.RuntimeError as e:
-        print("Build log:")
+        print("Erreur de compilation OpenCL :")
         for device in context.devices:
             print(program.get_build_info(device, cl.program_build_info.LOG))
         raise
 
+    # Préparation des paramètres pour l'initialisation
     frame = {'tn': tn, 'fn': fn, 'mn': mn, 'hn': hn, 'dir': direction}
     dwIv = build_iv(frame)
     qwIv = tea1_expand_iv(dwIv)
 
+    # Informations liées au périphérique
     device = context.devices[0]
     max_alloc_size = device.max_mem_alloc_size
     max_work_group_size = device.max_work_group_size
 
-    chunk_size = min((262 * 1024 * 1024) // key_length * key_length, 2**22)
-    global_size = (chunk_size,)
-    local_size = (min(max_work_group_size, chunk_size // key_length),)
+    # Taille des blocs à traiter par itération
+    chunk_size = min((262 * 1024 * 1024) // key_length * key_length, 1 << 18)  # 256K max clés
 
+    # Assurer des tailles valides pour le noyau
+    local_items = min(max_work_group_size, 256)
+    global_items = ((chunk_size + local_items - 1) // local_items) * local_items
+
+    global_size = (global_items,)
+    local_size = (local_items,)
+
+
+    # Allocation des buffers
     buffer_size = min(chunk_size * key_length, max_alloc_size // 2)
     output_buf = cl.Buffer(context, cl.mem_flags.WRITE_ONLY, size=buffer_size)
     match_counter_buf = cl.Buffer(context, cl.mem_flags.READ_WRITE, size=4)
-
     match_counter_np = np.zeros(1, dtype=np.uint32)
     cl.enqueue_copy(queue, match_counter_buf, match_counter_np).wait()
 
-    for counter_start in range(start, end, chunk_size):
-        counter_end = min(counter_start + chunk_size - 1, end)
+    # Préparation du noyau
+    kernel = cl.Kernel(program, "gen_ks")
 
-        kernel = program.gen_ks
+    # Boucle principale : balayage de la plage [start, end]
+    for counter_start in range(start, end, chunk_size):
+        if match_counter['value'] != 0:
+            print(f"Worker {multiprocessing.current_process().name} stoppe car clé trouvée.")
+            return None
+
         kernel.set_arg(0, output_buf)
         kernel.set_arg(1, np.uint32(counter_start))
-        kernel.set_arg(2, np.uint32(counter_end))
+        kernel.set_arg(2, np.uint32(min(counter_start + chunk_size - 1, end)))
         kernel.set_arg(3, match_counter_buf)
-        kernel.set_arg(4, np.uint32(eck))
+        kernel.set_arg(4, np.uint32(ks))
         kernel.set_arg(5, np.uint64(qwIv))
 
         cl.enqueue_nd_range_kernel(queue, kernel, global_size, local_size).wait()
@@ -216,6 +284,7 @@ def prepare_key_stream_worker(start, end, tn, hn, mn, fn, sn, direction, eck, ke
         cl.enqueue_copy(queue, match_counter_np, match_counter_buf).wait()
         if match_counter_np[0] != 0:
             match_counter['value'] = match_counter_np[0]
+            print(f"Worker {multiprocessing.current_process().name} a trouvé la clé !")
             return None
 
         keystream_chunk = np.empty(buffer_size, dtype=np.uint8)
@@ -229,13 +298,13 @@ def prepare_key_stream_worker(start, end, tn, hn, mn, fn, sn, direction, eck, ke
                 keystream_chunk[i + 3]
             )
 
-            if ks_combined == eck:
+            if ks_combined == ks:
                 match_counter['value'] = counter_start + i // key_length
+                print(f"Clé trouvée par worker {multiprocessing.current_process().name} à l'index {match_counter['value']}")
                 return keystream_chunk[:i + key_length]
+    return None  # Aucune correspondance trouvée dans cette plage
 
-    return None
-
-def prepare_key_stream(tn, hn, mn, fn, sn, direction, eck, key_length):
+def prepare_key_stream(tn, hn, mn, fn, sn, direction, ks, key_length):
     total_range = 0xFFFFFFFF
     num_threads = 32
     chunk_size = total_range // num_threads
@@ -244,43 +313,58 @@ def prepare_key_stream(tn, hn, mn, fn, sn, direction, eck, key_length):
 
     with Manager() as manager:
         match_counter = manager.dict({'value': 0})
-
-        with multiprocessing.Pool(processes=num_threads) as pool:
+        pool = multiprocessing.Pool(processes=num_threads)
+        try:
             results = pool.starmap(
                 prepare_key_stream_worker,
-                [(start, end, tn, hn, mn, fn, sn, direction, eck, key_length, match_counter) for start, end in ranges]
+                [(start, end, tn, hn, mn, fn, sn, direction, ks, key_length, match_counter) for start, end in ranges]
             )
+        except KeyboardInterrupt:
+            pool.terminate()
+            pool.join()
+            print("Interruption par l'utilisateur, fermeture du pool.")
+            sys.exit(1)
+        else:
+            pool.close()
+            pool.join()
 
     for result in results:
         if result is not None:
             return result
 
-    print(f"Match found at counter: {match_counter['value']:X}")
+    print(f"Match trouvé au compteur : {match_counter['value']:X}")
     return None
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate TEA keystream.")
-    parser.add_argument("tea_type", type=int, help="TEA type (1, 2, or 3)")
+    parser = argparse.ArgumentParser(description="Générer un keystream TEA.")
+    parser.add_argument("tn", type=int, help="Timeslot number (tn)")
     parser.add_argument("hn", type=int, help="Hyperframe number (hn)")
     parser.add_argument("mn", type=int, help="Multiframe number (mn)")
     parser.add_argument("fn", type=int, help="Frame number (fn)")
     parser.add_argument("sn", type=int, help="Slot number (sn)")
-    parser.add_argument("direction", type=int, help="Direction (0=downlink, 1=uplink)")
-    parser.add_argument("eck", type=str, help="Encryption key (8 hex digits)")
-    parser.add_argument("--key_length", type=int, default=64, help="Length of the keystream to generate (default: 64 bytes)")
+    parser.add_argument("direction", type=int, choices=[0,1], help="Direction (0=downlink, 1=uplink)")
+    parser.add_argument("ks", type=str, help="Encryption key (8 hex digits)")
+    parser.add_argument("--key_length", type=int, default=64, help="Longueur du keystream à générer (défaut: 64 octets)")
 
     args = parser.parse_args()
-    args.eck = args.eck[:8]
+    args.ks = args.ks[:8]
 
     try:
-        eck = int(args.eck, 16)
+        ks = int(args.ks, 16)
     except ValueError:
-        print("Error: `eck` must be a valid 8-character hex string.")
-        exit(1)
+        print("Erreur : ks doit être une chaîne hexadécimale de 8 caractères.")
+        sys.exit(1)
 
-    print(f"Generating keystream for TEA type {args.tea_type} with frame: hn={args.hn}, mn={args.mn}, fn={args.fn}, sn={args.sn}, dir={args.direction}, eck={args.eck}")
+    print(f"Génération du keystream pour frame: tn={args.tn}, hn={args.hn}, mn={args.mn}, fn={args.fn}, sn={args.sn}, dir={args.direction}, ks={args.ks}")
 
-    keystream = prepare_key_stream(args.tea_type, args.hn, args.mn, args.fn, args.sn, args.direction, eck, args.key_length)
+    try:
+        keystream = prepare_key_stream(args.tn, args.hn, args.mn, args.fn, args.sn, args.direction, ks, args.key_length)
+        if keystream is not None:
+            print("Keystream généré avec succès.")
+    except KeyboardInterrupt:
+        print("Interruption, fermeture...")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
