@@ -228,7 +228,7 @@ def prepare_key_stream_worker(start, end, tn, hn, mn, fn, sn, direction, ks, key
 
     # Compiler le noyau OpenCL
     try:
-        program = cl.Program(context, KERNEL_CODE).build()
+        program = cl.Program(context, KERNEL_CODE).build(options=["-w"])
     except cl.RuntimeError as e:
         print("Erreur de compilation OpenCL :")
         for device in context.devices:
