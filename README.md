@@ -1,20 +1,72 @@
-# tea1-cracker
+# TEA1 Key Brute-forcer (OpenCL Accelerated)
 
-example :  
+Ce projet est un outil de recherche de clé pour l'algorithme de chiffrement **TEA1**. Il utilise la puissance de calcul parallèle des processeurs graphiques (**GPU**) via **OpenCL** pour tester l'intégralité de l'espace des clés (32 bits) en un temps record.
 
-Generate a keystream from https://github.com/MidnightBlueLabs/TETRA_crypto  
-then try to reverse it with tea1_opencl_cracker.py  
+## 📖 Principe de fonctionnement
+
+Le script repose sur une attaque par **force brute à texte clair connu (Known Plaintext Attack)**. Si vous disposez d'un fragment du flux chiffré et que vous connaissez (ou devinez) le contenu original, vous pouvez isoler le **Keystream**.
+
+### 1. Inversion du Keystream
+
+TEA1 est un chiffrement de flux. Le processus est le suivant :
+
+
+
+Le script prend en entrée 64 bits (16 caractères hexadécimaux) de ce keystream pour valider si une clé candidate est la bonne.
+
+### 2. Algorithme de recherche
+
+* **Initialisation de l'IV** : Le script reconstruit l'Instruction Vector (IV) à partir des paramètres de trame (Timeslot, Frame Number, etc.) via la fonction `build_iv`.
+* **Parallélisation GPU** : L'espace de recherche de  clés est divisé en paquets (batches). Le kernel OpenCL teste simultanément des milliers de clés.
+* **Validation 64-bit** : Contrairement aux versions simplifiées qui testent 32 bits, ce script vérifie 64 bits du keystream pour éliminer les "fausses alertes" (collisions) et garantir que la clé trouvée est l'unique clé correcte.
+
+---
+
+## 🚀 Utilisation
+
+### Prérequis
+
+* Un GPU compatible OpenCL.
+* Python 3.x avec les bibliothèques : `pyopencl`, `numpy`.
+
+### Syntaxe
+
+Le script requiert les paramètres réseau de la trame interceptée pour synchroniser l'état interne de l'algorithme.
 
 ```bash
-(py310) nirvana@legion:~/TETRA_crypto$ ./gen_ks 1 110 30 06 1 0 11111111
-TEA1_reduced hn 110 mn 30 fn 6 tn 1 eck 11111111
-93794818CBE58966A07735527239B647AB8B67F1DA02580355F40C0F5BE7C99331989E1030E3FE5D4174D98B881E7039282161FAC805
-(py310) nirvana@legion:~/TETRA_crypto$ python prep.py 1 110 30 06 1 0 93794818CBE58966A07735527239B647AB8B67F1DA02580355F40C0F5BE7C99331989E1030E3FE5D4174D98B881E7039282161FAC805
-Génération du keystream pour frame: tn=1, hn=110, mn=30, fn=6, sn=1, dir=0, ks=93794818
-Potential Key found: 11111111 !
-^CInterruption par l'utilisateur, fermeture du pool.
+python crack_tea1.py <TN> <HN> <MN> <FN> <SN> <Direction> <Keystream_Hex>
+
 ```
 
-Video :  
+**Arguments :**
 
-https://www.youtube.com/watch?v=aam0SwD2Vt0
+* `TN`, `HN`, `MN`, `FN` : Numéros de trames et slots (Time/Hyper/Macro/Frame numbers).
+* `Direction` : 0 ou 1 (Uplink/Downlink).
+* `Keystream_Hex` : Les 16 premiers caractères hexadécimaux du keystream extrait.
+
+**Exemple :**
+
+```bash
+python crack_tea1.py 1 12345 10 500 0 1 AABBCCDDEEFF0011
+
+```
+
+---
+
+## ⚡ Performance et Impact
+
+### Impact Technique
+
+* **Vitesse** : Sur un GPU de milieu de gamme, l'intégralité de l'espace de clé 32 bits peut être parcourue en quelques minutes (voire secondes), contre plusieurs heures sur un CPU classique.
+* **Sécurité** : Cet outil démontre la faiblesse critique de TEA1. Avec une clé de seulement 32 bits d'entropie effective, le chiffrement ne résiste pas à une analyse computationnelle moderne.
+
+### Limites
+
+* **Accès au Keystream** : L'utilisateur doit être capable d'identifier au moins 8 octets de données connues (comme des en-têtes LLC ou IP) pour extraire le keystream.
+* **Matériel** : La performance dépend directement du nombre d'unités de calcul (Compute Units) du GPU utilisé.
+
+---
+
+## ⚠️ Avertissement Légal
+
+Cet outil est fourni à des fins **éducatives et de recherche en cybersécurité** uniquement. L'interception et le décodage de communications privées sans autorisation sont illégaux dans la plupart des juridictions. L'utilisateur est seul responsable de l'usage qu'il fait de ce logiciel.
