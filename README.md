@@ -47,8 +47,7 @@ python crack_tea1.py <TN> <HN> <MN> <FN> <SN> <Direction> <Keystream_Hex>
 **Exemple :**
 
 ```bash
-python crack_tea1.py 1 12345 10 500 0 1 AABBCCDDEEFF0011
-
+python tea1_opencl_crack.py 1 110 30 06 1 0 0BE7FE9AE1EA459F866919C9E2EA1E11A77A4493D658A4191EDD987F37DE12B1DA3F7BBD62607E8CE787C2FE544B2FAAEAED38255BEB
 ```
 
 ---
